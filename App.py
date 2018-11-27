@@ -93,15 +93,11 @@ class CollectClustering(base_agent.BaseAgent):
         if not marines or not minerals:
             return FUNCTIONS.no_op()
 
-        kmeans = KMeans(n_clusters=len(marines)).fit(minerals)
-
         marine_index, marine_unit = next(((index, m) for (index, m) in enumerate(marines)
-                            if m.is_selected == self._marine_selected), (marines[0], 0))
+                                          if m.is_selected == self._marine_selected), (marines[0], 0))
 
         marine_xy = [marine_unit.x, marine_unit.y]
 
-        minerals_for_selected = list([m for (index, m) in enumerate(minerals)]
-                                     if kmeans.labels[index] == marine_index)
 
         if not marine_unit.is_selected:
             # Nothing selected or the wrong marine is selected.
@@ -110,23 +106,23 @@ class CollectClustering(base_agent.BaseAgent):
 
 
 
-
         if FUNCTIONS.Move_screen.id in obs.observation.available_actions:
-            if self._previous_mineral_xy in minerals:
-                # Don't go for the same mineral shard as other marine.
-                minerals.remove(self._previous_mineral_xy)
+            if (len(minerals) < len(marines)):
+                minerals_for_selected = minerals
+            else:
+                marines_xy = numpy.array([[m.x, m.y] for m in marines])
+                kmeans = KMeans(n_clusters=len(marine_xy), init=marines_xy, n_init=1).fit(minerals)
+                minerals_for_selected = list([m for (index, m) in enumerate(minerals)
+                                              if kmeans.labels_[index] == marine_index])
+            # Find the closest.
+            distances = numpy.linalg.norm(
+                numpy.array(minerals_for_selected) - numpy.array(marine_xy), axis=1)
+            closest_mineral_xy = minerals_for_selected[numpy.argmin(distances)]
 
-            if minerals:
-                # Find the closest.
-                minerals = [z[0]]
-                distances = numpy.linalg.norm(
-                    numpy.array(minerals) - numpy.array(marine_xy), axis=1)
-                closest_mineral_xy = minerals[numpy.argmin(distances)]
-
-                # Swap to the other marine.
-                self._marine_selected = False
-                self._previous_mineral_xy = closest_mineral_xy
-                return FUNCTIONS.Move_screen("now", closest_mineral_xy)
+            # Swap to the other marine.
+            self._marine_selected = False
+            self._previous_mineral_xy = closest_mineral_xy
+            return FUNCTIONS.Move_screen("now", closest_mineral_xy)
 
         return FUNCTIONS.no_op()
 
@@ -189,7 +185,7 @@ class CollectMineralShardsFeatureUnits(base_agent.BaseAgent):
 class DefeatRoaches(base_agent.BaseAgent):
     """An agent specifically for solving the DefeatRoaches map."""
 
-    def step(self, obs):
+)    def step(self, obs):
         super(DefeatRoaches, self).step(obs)
         if FUNCTIONS.Attack_screen.id in obs.observation.available_actions:
             player_relative = obs.observation.feature_screen.player_relative
