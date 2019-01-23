@@ -1,203 +1,178 @@
-# Copyright 2017 Google Inc. All Rights Reserved.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#      http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS-IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-"""Scripted agents."""
+import random
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
-import numpy
 
 from pysc2.agents import base_agent
 from pysc2.lib import actions
 from pysc2.lib import features
 
-_PLAYER_SELF = features.PlayerRelative.SELF
-_PLAYER_NEUTRAL = features.PlayerRelative.NEUTRAL  # beacon/minerals
-_PLAYER_ENEMY = features.PlayerRelative.ENEMY
+from QLearningTable import QLearningTable
 
-FUNCTIONS = actions.FUNCTIONS
+_NO_OP = actions.FUNCTIONS.no_op.id
+_SELECT_POINT = actions.FUNCTIONS.select_point.id
+_BUILD_SUPPLY_DEPOT = actions.FUNCTIONS.Build_SupplyDepot_screen.id
+_BUILD_BARRACKS = actions.FUNCTIONS.Build_Barracks_screen.id
+_TRAIN_MARINE = actions.FUNCTIONS.Train_Marine_quick.id
+_SELECT_ARMY = actions.FUNCTIONS.select_army.id
+_ATTACK_MINIMAP = actions.FUNCTIONS.Attack_minimap.id
 
-from sklearn.cluster import KMeans
+_PLAYER_RELATIVE = features.SCREEN_FEATURES.player_relative.index
+_UNIT_TYPE = features.SCREEN_FEATURES.unit_type.index
+_PLAYER_ID = features.SCREEN_FEATURES.player_id.index
 
+_PLAYER_SELF = 1
 
+_TERRAN_COMMANDCENTER = 18
+_TERRAN_SCV = 45
+_TERRAN_SUPPLY_DEPOT = 19
+_TERRAN_BARRACKS = 21
 
-def _xy_locs(mask):
-    """Mask should be a set of bools from comparison with a feature layer."""
-    y, x = mask.nonzero()
-    return list(zip(x, y))
+_NOT_QUEUED = [0]
+_QUEUED = [1]
 
+ACTION_DO_NOTHING = 'donothing'
+ACTION_SELECT_SCV = 'selectscv'
+ACTION_BUILD_SUPPLY_DEPOT = 'buildsupplydepot'
+ACTION_BUILD_BARRACKS = 'buildbarracks'
+ACTION_SELECT_BARRACKS = 'selectbarracks'
+ACTION_BUILD_MARINE = 'buildmarine'
+ACTION_SELECT_ARMY = 'selectarmy'
+ACTION_ATTACK = 'attack'
 
-class MoveToBeacon(base_agent.BaseAgent):
-    """An agent specifically for solving the MoveToBeacon map."""
+smart_actions = [
+	ACTION_DO_NOTHING,
+	ACTION_SELECT_SCV,
+	ACTION_BUILD_SUPPLY_DEPOT,
+	ACTION_BUILD_BARRACKS,
+	ACTION_SELECT_BARRACKS,
+	ACTION_BUILD_MARINE,
+	ACTION_SELECT_ARMY,
+	ACTION_ATTACK,
+]
 
-    def step(self, obs):
-        super(MoveToBeacon, self).step(obs)
-        if FUNCTIONS.Move_screen.id in obs.observation.available_actions:
-            player_relative = obs.observation.feature_screen.player_relative
-            beacon = _xy_locs(player_relative == _PLAYER_NEUTRAL)
-            if not beacon:
-                return FUNCTIONS.no_op()
-            beacon_center = numpy.mean(beacon, axis=0).round()
-            return FUNCTIONS.Move_screen("now", beacon_center)
-        else:
-            return FUNCTIONS.select_army("select")
-
-
-class CollectMineralShards(base_agent.BaseAgent):
-    """An agent specifically for solving the CollectMineralShards map."""
-
-    def step(self, obs):
-        super(CollectMineralShards, self).step(obs)
-        if FUNCTIONS.Move_screen.id in obs.observation.available_actions:
-            player_relative = obs.observation.feature_screen.player_relative
-            minerals = _xy_locs(player_relative == _PLAYER_NEUTRAL)
-            if not minerals:
-                return FUNCTIONS.no_op()
-            marines = _xy_locs(player_relative == _PLAYER_SELF)
-            marine_xy = numpy.mean(marines, axis=0).round()  # Average location.
-            distances = numpy.linalg.norm(numpy.array(minerals) - marine_xy, axis=1)
-            closest_mineral_xy = minerals[numpy.argmin(distances)]
-            return FUNCTIONS.Move_screen("now", closest_mineral_xy)
-        else:
-            return FUNCTIONS.select_army("select")
-
-class CollectClustering(base_agent.BaseAgent):
-    def setup(self, obs_spec, action_spec):
-        super(CollectClustering, self).setup(obs_spec, action_spec)
-        if "feature_units" not in obs_spec:
-            raise Exception("This agent requires the feature_units observation.")
-
-    def reset(self):
-        super(CollectClustering, self).reset()
-        self._marine_selected = False
-        self._previous_mineral_xy = [-1, -1]
-
-    def step(self, obs):
-        super(CollectClustering, self).step(obs)
-        minerals = [[unit.x, unit.y] for unit in obs.observation.feature_units
-                    if unit.alliance == _PLAYER_NEUTRAL]
-        marines = [unit for unit in obs.observation.feature_units
-                   if unit.alliance == _PLAYER_SELF]
-        if not marines or not minerals:
-            return FUNCTIONS.no_op()
-
-        marine_index, marine_unit = next(((index, m) for (index, m) in enumerate(marines)
-                                          if m.is_selected == self._marine_selected), (marines[0], 0))
-
-        marine_xy = [marine_unit.x, marine_unit.y]
+KILL_UNIT_REWARD = 0.2
+KILL_BUILDING_REWARD = 0.5
 
 
-        if not marine_unit.is_selected:
-            # Nothing selected or the wrong marine is selected.
-            self._marine_selected = True
-            return FUNCTIONS.select_point("select", marine_xy)
+class SmartAgent(base_agent.BaseAgent):
+	def __init__(self):
+		super(SmartAgent, self).__init__()
 
+		self.qlearn = QLearningTable(actions=list(range(len(smart_actions))))
 
+		self.previous_killed_unit_score = 0
+		self.previous_killed_building_score = 0
 
-        if FUNCTIONS.Move_screen.id in obs.observation.available_actions:
-            if (len(minerals) < len(marines)):
-                minerals_for_selected = minerals
-            else:
-                marines_xy = numpy.array([[m.x, m.y] for m in marines])
-                kmeans = KMeans(n_clusters=len(marine_xy), init=marines_xy, n_init=1).fit(minerals)
-                minerals_for_selected = list([m for (index, m) in enumerate(minerals)
-                                              if kmeans.labels_[index] == marine_index])
-            # Find the closest.
-            distances = numpy.linalg.norm(
-                numpy.array(minerals_for_selected) - numpy.array(marine_xy), axis=1)
-            closest_mineral_xy = minerals_for_selected[numpy.argmin(distances)]
+		self.previous_action = None
+		self.previous_state = None
 
-            # Swap to the other marine.
-            self._marine_selected = False
-            self._previous_mineral_xy = closest_mineral_xy
-            return FUNCTIONS.Move_screen("now", closest_mineral_xy)
+	def transformLocation(self, x, x_distance, y, y_distance):
+		if not self.base_top_left:
+			return [x - x_distance, y - y_distance]
 
-        return FUNCTIONS.no_op()
+		return [x + x_distance, y + y_distance]
 
-class CollectMineralShardsFeatureUnits(base_agent.BaseAgent):
-    """An agent for solving the CollectMineralShards map with feature units.
-    Controls the two marines independently:
-    - select marine
-    - move to nearest mineral shard that wasn't the previous target
-    - swap marine and repeat
-    """
+	def step(self, obs):
 
-    def setup(self, obs_spec, action_spec):
-        super(CollectMineralShardsFeatureUnits, self).setup(obs_spec, action_spec)
-        if "feature_units" not in obs_spec:
-            raise Exception("This agent requires the feature_units observation.")
+		super(SmartAgent, self).step(obs)
 
-    def reset(self):
-        super(CollectMineralShardsFeatureUnits, self).reset()
-        self._marine_selected = False
-        self._previous_mineral_xy = [-1, -1]
+		player_y, player_x = (obs.observation.feature_minimap.player_relative == features.PlayerRelative.SELF).nonzero()
+		self.base_top_left = 1 if player_y.any() and player_y.mean() <= 31 else 0
 
-    def step(self, obs):
-        super(CollectMineralShardsFeatureUnits, self).step(obs)
-        marines = [unit for unit in obs.observation.feature_units
-                   if unit.alliance == _PLAYER_SELF]
-        if not marines:
-            return FUNCTIONS.no_op()
-        marine_unit = next((m for m in marines
-                            if m.is_selected == self._marine_selected), marines[0])
-        marine_xy = [marine_unit.x, marine_unit.y]
+		unit_type = obs.observation['feature_screen'][_UNIT_TYPE]
 
-        if not marine_unit.is_selected:
-            # Nothing selected or the wrong marine is selected.
-            self._marine_selected = True
-            return FUNCTIONS.select_point("select", marine_xy)
+		depot_y, depot_x = (unit_type == _TERRAN_SUPPLY_DEPOT).nonzero()
+		supply_depot_count = supply_depot_count = 1 if depot_y.any() else 0
 
-        if FUNCTIONS.Move_screen.id in obs.observation.available_actions:
-            # Find and move to the nearest mineral.
-            minerals = [[unit.x, unit.y] for unit in obs.observation.feature_units
-                        if unit.alliance == _PLAYER_NEUTRAL]
+		barracks_y, barracks_x = (unit_type == _TERRAN_BARRACKS).nonzero()
+		barracks_count = 1 if barracks_y.any() else 0
 
-            if self._previous_mineral_xy in minerals:
-                # Don't go for the same mineral shard as other marine.
-                minerals.remove(self._previous_mineral_xy)
+		supply_limit = obs.observation['player'][4]
+		army_supply = obs.observation['player'][5]
 
-            if minerals:
-                # Find the closest.
-                distances = numpy.linalg.norm(
-                    numpy.array(minerals) - numpy.array(marine_xy), axis=1)
-                closest_mineral_xy = minerals[numpy.argmin(distances)]
+		killed_unit_score = obs.observation['score_cumulative'][5]
+		killed_building_score = obs.observation['score_cumulative'][6]
 
-                # Swap to the other marine.
-                self._marine_selected = False
-                self._previous_mineral_xy = closest_mineral_xy
-                return FUNCTIONS.Move_screen("now", closest_mineral_xy)
+		current_state = [
+			supply_depot_count,
+			barracks_count,
+			supply_limit,
+			army_supply,
+		]
 
-        return FUNCTIONS.no_op()
+		if self.previous_action is not None:
+			reward = 0
 
+			if killed_unit_score > self.previous_killed_unit_score:
+				reward += KILL_UNIT_REWARD
 
-class DefeatRoaches(base_agent.BaseAgent):
-    """An agent specifically for solving the DefeatRoaches map."""
+			if killed_building_score > self.previous_killed_building_score:
+				reward += KILL_BUILDING_REWARD
 
-)    def step(self, obs):
-        super(DefeatRoaches, self).step(obs)
-        if FUNCTIONS.Attack_screen.id in obs.observation.available_actions:
-            player_relative = obs.observation.feature_screen.player_relative
-            roaches = _xy_locs(player_relative == _PLAYER_ENEMY)
-            if not roaches:
-                return FUNCTIONS.no_op()
+			self.qlearn.learn(str(self.previous_state), self.previous_action, reward, str(current_state))
 
-            # Find the roach with max y coord.
-            target = roaches[numpy.argmax(numpy.array(roaches)[:, 1])]
-            return FUNCTIONS.Attack_screen("now", target)
+		rl_action = self.qlearn.choose_action(str(current_state))
+		smart_action = smart_actions[rl_action]
 
-        if FUNCTIONS.select_army.id in obs.observation.available_actions:
-            return FUNCTIONS.select_army("select")
+		self.previous_killed_unit_score = killed_unit_score
+		self.previous_killed_building_score = killed_building_score
+		self.previous_state = current_state
+		self.previous_action = rl_action
 
-        return FUNCTIONS.no_op()
+		if smart_action == ACTION_DO_NOTHING:
+			return actions.FunctionCall(_NO_OP, [])
+
+		elif smart_action == ACTION_SELECT_SCV:
+			unit_type = obs.observation['feature_screen'][_UNIT_TYPE]
+			unit_y, unit_x = (unit_type == _TERRAN_SCV).nonzero()
+
+			if unit_y.any():
+				i = random.randint(0, len(unit_y) - 1)
+				target = [unit_x[i], unit_y[i]]
+
+				return actions.FunctionCall(_SELECT_POINT, [_NOT_QUEUED, target])
+
+		elif smart_action == ACTION_BUILD_SUPPLY_DEPOT:
+			if _BUILD_SUPPLY_DEPOT in obs.observation['available_actions']:
+				unit_type = obs.observation['feature_screen'][_UNIT_TYPE]
+				unit_y, unit_x = (unit_type == _TERRAN_COMMANDCENTER).nonzero()
+
+				if unit_y.any():
+					target = self.transformLocation(int(unit_x.mean()), 0, int(unit_y.mean()), 20)
+
+					return actions.FunctionCall(_BUILD_SUPPLY_DEPOT, [_NOT_QUEUED, target])
+
+		elif smart_action == ACTION_BUILD_BARRACKS:
+			if _BUILD_BARRACKS in obs.observation['available_actions']:
+				unit_type = obs.observation['feature_screen'][_UNIT_TYPE]
+				unit_y, unit_x = (unit_type == _TERRAN_COMMANDCENTER).nonzero()
+
+				if unit_y.any():
+					target = self.transformLocation(int(unit_x.mean()), 20, int(unit_y.mean()), 0)
+
+					return actions.FunctionCall(_BUILD_BARRACKS, [_NOT_QUEUED, target])
+
+		elif smart_action == ACTION_SELECT_BARRACKS:
+			unit_type = obs.observation['feature_screen'][_UNIT_TYPE]
+			unit_y, unit_x = (unit_type == _TERRAN_BARRACKS).nonzero()
+
+			if unit_y.any():
+				target = [int(unit_x.mean()), int(unit_y.mean())]
+
+				return actions.FunctionCall(_SELECT_POINT, [_NOT_QUEUED, target])
+
+		elif smart_action == ACTION_BUILD_MARINE:
+			if _TRAIN_MARINE in obs.observation['available_actions']:
+				return actions.FunctionCall(_TRAIN_MARINE, [_QUEUED])
+
+		elif smart_action == ACTION_SELECT_ARMY:
+			if _SELECT_ARMY in obs.observation['available_actions']:
+				return actions.FunctionCall(_SELECT_ARMY, [_NOT_QUEUED])
+
+		elif smart_action == ACTION_ATTACK:
+			if _ATTACK_MINIMAP in obs.observation["available_actions"]:
+				if self.base_top_left:
+					return actions.FunctionCall(_ATTACK_MINIMAP, [_NOT_QUEUED, [39, 45]])
+
+				return actions.FunctionCall(_ATTACK_MINIMAP, [_NOT_QUEUED, [21, 24]])
+
+		return actions.FunctionCall(_NO_OP, [])
