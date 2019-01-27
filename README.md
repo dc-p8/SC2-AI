@@ -1,5 +1,8 @@
 # SC2-AI
 Attempt to replace the Q learning algorithm used in this [tutorial](https://github.com/skjb/pysc2-tutorial/blob/master/Refining%20the%20Sparse%20Reward%20Agent/refined_agent.py) by DQN.
+My main source of information for DQN is [this guy](https://www.youtube.com/watch?v=OYhFoMySoVs) on youtube who make a network that play the cartpole game : https://github.com/the-deep-learners/TensorFlow-LiveLessons/blob/master/notebooks/live_training/cartpole_dqn_LT.ipynb
+
+The main difference between the two DQN implementations is that I need stock the *state, action, reward, next_state* tuple in order to modify it, depending on the last observation, in which I know if the game is won or lost.
 
 -	The inputs of the neural network are the different variables representing the state of the game.
 -	The outputs are the differents Q values of each smart actions given a state.
